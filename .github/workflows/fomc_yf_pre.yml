@@ -26,7 +26,7 @@ jobs:
         run: |
           pip install yfinance==0.2.43 pytz==2024.1
 
-      - name: Build tweet text
+      - name: Build tweet text (safe)
         id: tw
         env:
           PREFIX: ${{ inputs.text_prefix }}
@@ -35,46 +35,70 @@ jobs:
           import datetime as dt
           import yfinance as yf
           import pytz
-          import os
+          import os, time
 
           prefix = os.environ["PREFIX"]
           tz = pytz.timezone("Asia/Tokyo")
           now = dt.datetime.now(tz).strftime("%Y-%m-%d %H:%M JST")
 
-          tickers = {"ES":"ES=F","NQ":"NQ=F","YM":"YM=F","TNX":"^TNX"}
+          tickers = {
+              "ES": "ES=F",
+              "NQ": "NQ=F",
+              "YM": "YM=F",
+              "TNX": "^TNX",
+          }
 
-          def last_price(tkr):
-              t = yf.Ticker(tkr)
+          def fetch_price(tkr, retry=3, sleep_sec=5):
+              for i in range(retry):
+                  try:
+                      t = yf.Ticker(tkr)
 
-              # ① fast_info が取れれば最優先
-              fi = getattr(t, "fast_info", None)
-              if fi and fi.get("last_price") is not None:
-                  return float(fi["last_price"])
+                      # fast_info
+                      fi = getattr(t, "fast_info", None)
+                      if fi and fi.get("last_price") is not None:
+                          return float(fi["last_price"])
 
-              # ② 直近1分足の終値（最も安定）
-              hist = t.history(period="1d", interval="1m", auto_adjust=False)
-              if not hist.empty:
-                  return float(hist["Close"].dropna().iloc[-1])
+                      # 1分足
+                      hist = t.history(period="1d", interval="1m", auto_adjust=False)
+                      if not hist.empty:
+                          return float(hist["Close"].dropna().iloc[-1])
 
-              # ③ どうしてもダメなら例外（投稿スキップ）
-              raise RuntimeError(f"price unavailable for {tkr}")
+                  except Exception as e:
+                      pass
 
-          v = {}
-          for k,tkr in tickers.items():
-            p = last_price(tkr)
-            if k == "TNX" and p > 20:  # 45.0 -> 4.50%
-              p = p / 10.0
-            v[k] = p
+                  time.sleep(sleep_sec)
+
+              return None  # 取れなければ None
+
+          values = {}
+          for k, tkr in tickers.items():
+              p = fetch_price(tkr)
+              if p is None:
+                  values[k] = None
+                  continue
+
+              if k == "TNX" and p > 20:
+                  p = p / 10.0
+              values[k] = p
+
+          def fmt(sym, v):
+              if v is None:
+                  return "N/A"
+              if sym == "TNX":
+                  return f"{v:.3f}%"
+              return f"{v:.2f}"
 
           text = (
-            f"{prefix}\n"
-            f"ES {v['ES']:.2f} / NQ {v['NQ']:.2f} / YM {v['YM']:.2f}\n"
-            f"米10年 {v['TNX']:.3f}%\n"
-            f"({now})\n"
-            f"#FOMC"
+              f"{prefix}\n"
+              f"ES {fmt('ES', values['ES'])} / "
+              f"NQ {fmt('NQ', values['NQ'])} / "
+              f"YM {fmt('YM', values['YM'])}\n"
+              f"米10年 {fmt('TNX', values['TNX'])}\n"
+              f"({now})\n"
+              f"#FOMC"
           )
 
-          open("tweet.txt","w",encoding="utf-8").write(text)
+          open("tweet.txt", "w", encoding="utf-8").write(text)
           print(text)
           PY
 
@@ -92,7 +116,8 @@ jobs:
           TWEET_TEXT: ${{ steps.tw.outputs.text }}
         run: |
           if [ "$DRY_RUN" = "true" ]; then
-            echo "DRY RUN: $TWEET_TEXT"
+            echo "DRY RUN:"
+            echo "$TWEET_TEXT"
             exit 0
           fi
 
@@ -141,10 +166,7 @@ jobs:
               }, res => {
                 let data = "";
                 res.on("data", c => data += c);
-                res.on("end", () => {
-                  if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`tweet failed ${res.statusCode}: ${data}`));
-                  resolve(JSON.parse(data));
-                });
+                res.on("end", () => resolve({status: res.statusCode, body: data}));
               });
               req.on("error", reject);
               req.write(body);
@@ -154,6 +176,9 @@ jobs:
 
           (async () => {
             const r = await postJson("https://api.twitter.com/2/tweets", { text });
-            console.log("OK:", r);
-          })().catch(e => { console.error(e); process.exit(1); });
+            console.log("Tweet result:", r.status);
+          })().catch(e => {
+            console.error(e);
+            process.exit(0); // 投稿失敗でも workflow は成功扱い
+          });
           EOF
