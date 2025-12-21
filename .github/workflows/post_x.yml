@@ -1,0 +1,19 @@
+name: Post to X
+
+on:
+  workflow_dispatch:
+    inputs:
+      post_text:
+        description: "Text to post"
+        required: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post to X
+        run: |
+          echo "${{ inputs.post_text }}"
+          # ここで X API 投稿処理
