@@ -26,7 +26,7 @@ jobs:
         run: |
           pip install yfinance==0.2.43 pytz==2024.1
 
-      - name: Build tweet text (safe)
+      - name: Build tweet text (safe + base64 output)
         id: tw
         env:
           PREFIX: ${{ inputs.text_prefix }}
@@ -37,7 +37,7 @@ jobs:
           import pytz
           import os, time
 
-          prefix = os.environ["PREFIX"]
+          prefix = os.environ.get("PREFIX", "🟡FOMC 5分前｜先物の水準")
           tz = pytz.timezone("Asia/Tokyo")
           now = dt.datetime.now(tz).strftime("%Y-%m-%d %H:%M JST")
 
@@ -45,30 +45,37 @@ jobs:
               "ES": "ES=F",
               "NQ": "NQ=F",
               "YM": "YM=F",
-              "TNX": "^TNX",
+              "TNX": "^TNX",  # 10年金利（指数）
           }
 
-          def fetch_price(tkr, retry=3, sleep_sec=5):
-              for i in range(retry):
+          def fetch_price_once(tkr: str):
+              t = yf.Ticker(tkr)
+
+              # ① fast_info（取れれば最速）
+              fi = getattr(t, "fast_info", None)
+              if fi and fi.get("last_price") is not None:
+                  return float(fi["last_price"])
+
+              # ② 直近1分足（quoteSummaryを避ける＝429耐性が高い）
+              hist = t.history(period="1d", interval="1m", auto_adjust=False)
+              if hist is not None and not hist.empty:
+                  s = hist["Close"].dropna()
+                  if len(s) > 0:
+                      return float(s.iloc[-1])
+
+              return None
+
+          def fetch_price(tkr: str, retry=3, sleep_sec=5):
+              last = None
+              for _ in range(retry):
                   try:
-                      t = yf.Ticker(tkr)
-
-                      # fast_info
-                      fi = getattr(t, "fast_info", None)
-                      if fi and fi.get("last_price") is not None:
-                          return float(fi["last_price"])
-
-                      # 1分足
-                      hist = t.history(period="1d", interval="1m", auto_adjust=False)
-                      if not hist.empty:
-                          return float(hist["Close"].dropna().iloc[-1])
-
-                  except Exception as e:
+                      last = fetch_price_once(tkr)
+                      if last is not None:
+                          return last
+                  except Exception:
                       pass
-
                   time.sleep(sleep_sec)
-
-              return None  # 取れなければ None
+              return None
 
           values = {}
           for k, tkr in tickers.items():
@@ -76,7 +83,7 @@ jobs:
               if p is None:
                   values[k] = None
                   continue
-
+              # ^TNX が 45.0 のように 10倍表示になる場合があるので補正
               if k == "TNX" and p > 20:
                   p = p / 10.0
               values[k] = p
@@ -90,33 +97,34 @@ jobs:
 
           text = (
               f"{prefix}\n"
-              f"ES {fmt('ES', values['ES'])} / "
-              f"NQ {fmt('NQ', values['NQ'])} / "
-              f"YM {fmt('YM', values['YM'])}\n"
+              f"ES {fmt('ES', values['ES'])} / NQ {fmt('NQ', values['NQ'])} / YM {fmt('YM', values['YM'])}\n"
               f"米10年 {fmt('TNX', values['TNX'])}\n"
               f"({now})\n"
               f"#FOMC"
           )
 
-          open("tweet.txt", "w", encoding="utf-8").write(text)
+          with open("tweet.txt", "w", encoding="utf-8") as f:
+              f.write(text)
+
           print(text)
           PY
-          
+
+          # ✅ delimiter方式を捨てて Base64 で outputs に載せる（100%壊れない）
           ENCODED=$(base64 -w 0 tweet.txt)
           echo "text_b64=$ENCODED" >> "$GITHUB_OUTPUT"
 
-
-
       - name: Post to X (OAuth1) - text only
         env:
-         DRY_RUN: ${{ inputs.dry_run }}
-         X_API_KEY: ${{ secrets.X_API_KEY }}
-         X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
-         X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-         X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-         TWEET_TEXT_B64: ${{ steps.tw.outputs.text_b64 }}
-
+          DRY_RUN: ${{ inputs.dry_run }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          TWEET_TEXT_B64: ${{ steps.tw.outputs.text_b64 }}
         run: |
+          # Base64復号
+          TWEET_TEXT=$(echo "$TWEET_TEXT_B64" | base64 -d)
+
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY RUN:"
             echo "$TWEET_TEXT"
@@ -127,7 +135,7 @@ jobs:
           const crypto = require("crypto");
           const https = require("https");
 
-          const text = Buffer.from(process.env.TWEET_TEXT_B64, "base64").toString("utf8");
+          const text = process.env.TWEET_TEXT;
           const apiKey = process.env.X_API_KEY;
           const apiKeySecret = process.env.X_API_KEY_SECRET;
           const accessToken = process.env.X_ACCESS_TOKEN;
@@ -179,8 +187,11 @@ jobs:
           (async () => {
             const r = await postJson("https://api.twitter.com/2/tweets", { text });
             console.log("Tweet result:", r.status);
+            // 投稿が失敗しても workflow 自体は落とさない（運用優先）
           })().catch(e => {
             console.error(e);
-            process.exit(0); // 投稿失敗でも workflow は成功扱い
+            process.exit(0);
           });
           EOF
+        env:
+          TWEET_TEXT: ${{ env.TWEET_TEXT }}
