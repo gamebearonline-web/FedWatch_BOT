@@ -1,4 +1,4 @@
-name: FedWatch Image Post (Auto Capture)
+name: FedWatch Image Post (JSON → Image)
 
 on:
   workflow_dispatch:
@@ -22,51 +22,91 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- Playwright環境 ---
+      # --- Node 環境 ---
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Playwright
+      # --- 依存関係 ---
+      - name: Install deps
         run: |
           npm init -y
-          npm install playwright
-          npx playwright install chromium
+          npm install canvas node-fetch@3
 
-      # --- CME FedWatch をキャプチャ ---
-      - name: Capture FedWatch Image
+      # --- CME FedWatch JSON → 画像生成 ---
+      - name: Generate FedWatch Image
         run: |
           node << 'EOF'
-          const { chromium } = require('playwright');
-          (async () => {
-            const browser = await chromium.launch();
-            const page = await browser.newPage({
-              viewport: { width: 1280, height: 900 }
-            });
+          import fetch from "node-fetch";
+          import { createCanvas } from "canvas";
+          import fs from "fs";
 
-            await page.goto(
-              'https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html',
-              { waitUntil: 'networkidle' }
-            );
+          // --- ① FedWatch JSON ---
+          const res = await fetch(
+            "https://www.cmegroup.com/CmeWS/mvc/FedWatch/GetFedWatchData"
+          );
+          if (!res.ok) throw new Error("Failed to fetch FedWatch JSON");
+          const data = await res.json();
 
-            // Cookie / banner 対策（あれば）
-            await page.waitForTimeout(5000);
+          const meetingDate = data.meetingDate || "FOMC";
+          const rows = data.probabilities || [];
 
-            // FedWatch の確率テーブル（DOM変更に強め）
-            const target = await page.$('div.cmeFedWatchTool, table');
-            if (!target) throw new Error('FedWatch table not found');
+          if (rows.length === 0) {
+            throw new Error("No probabilities in FedWatch JSON");
+          }
 
-            await target.screenshot({ path: 'fedwatch.png' });
+          // --- ② Canvas で画像生成 ---
+          const width = 900;
+          const rowH = 48;
+          const height = 140 + rows.length * rowH;
 
-            await browser.close();
-          })();
+          const canvas = createCanvas(width, height);
+          const ctx = canvas.getContext("2d");
+
+          // 背景
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, width, height);
+
+          // タイトル
+          ctx.fillStyle = "#111";
+          ctx.font = "bold 30px Sans";
+          ctx.fillText("FedWatch Probabilities", 30, 42);
+
+          ctx.font = "20px Sans";
+          ctx.fillText(`Meeting: ${meetingDate}`, 30, 72);
+
+          // ヘッダ
+          let y = 110;
+          ctx.font = "bold 20px Sans";
+          ctx.fillText("Target Rate", 40, y);
+          ctx.fillText("Probability", 360, y);
+
+          y += 16;
+
+          ctx.font = "20px Sans";
+
+          rows.forEach(r => {
+            y += rowH;
+            const p = Number(r.probability);
+
+            ctx.fillStyle = "#000";
+            ctx.fillText(r.targetRate, 40, y);
+            ctx.fillText(`${p.toFixed(1)}%`, 360, y);
+
+            // バー
+            ctx.fillStyle = "#2563eb";
+            ctx.fillRect(480, y - 18, p * 3, 18);
+          });
+
+          fs.writeFileSync("fedwatch.png", canvas.toBuffer("image/png"));
+          console.log("fedwatch.png generated");
           EOF
 
       - name: Check image
         run: ls -lh fedwatch.png
 
-      # --- 投稿（OAuth1） ---
+      # --- 投稿（OAuth1 / 既存ロジック） ---
       - name: Post to X
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
