@@ -1,274 +1,74 @@
-name: FedWatch Image Post (JSON → Image)
-
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "pre or post"
         required: true
-        default: "pre"
       text:
-        description: "post text"
         required: true
       dry_run:
-        description: "true/false"
-        required: false
-        default: "false"
+        required: true
+      fedwatch_json:
+        required: true
 
-jobs:
-  post:
-    runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v4
+- name: Generate FedWatch Image
+  env:
+    MODE: ${{ inputs.mode }}
+    FEDWATCH_JSON: ${{ inputs.fedwatch_json }}
+  run: |
+    node << 'EOF'
+    import { createCanvas } from "canvas";
+    import fs from "fs";
 
-      # -------------------------
-      # Node 環境
-      # -------------------------
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+    const data = JSON.parse(process.env.FEDWATCH_JSON);
+    const mode = process.env.MODE || "pre";
 
-      # -------------------------
-      # 依存関係
-      # -------------------------
-      - name: Install deps
-        run: |
-          npm init -y
-          npm install canvas node-fetch@3
+    const rows = data.probabilities || [];
+    const meetingDate = data.meetingDate || "FOMC";
 
-      # -------------------------
-      # CME FedWatch JSON → 画像生成
-      # -------------------------
-      - name: Generate FedWatch Image
-        env:
-          MODE: ${{ inputs.mode }}
-        run: |
-          node << 'EOF'
-          import fetch from "node-fetch";
-          import { createCanvas } from "canvas";
-          import fs from "fs";
+    const width = 900;
+    const rowH = 48;
+    const height = 140 + rows.length * rowH;
 
-          // =====================================================
-          // ① FedWatch JSON（UA付き + リトライ付き）
-          // =====================================================
-          async function fetchFedWatch(retry = 3) {
-            try {
-              const res = await fetch(
-                "https://www.cmegroup.com/CmeWS/mvc/FedWatch/GetFedWatchData",
-                {
-                  headers: {
-                    "User-Agent":
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                      "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                    "Accept": "application/json, text/plain, */*",
-                    "Referer":
-                      "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html",
-                  },
-                  redirect: "follow",
-                }
-              );
-              if (!res.ok) throw new Error(`HTTP ${res.status}`);
-              return await res.json();
-            } catch (e) {
-              if (retry <= 0) throw e;
-              await new Promise(r => setTimeout(r, 1500));
-              return fetchFedWatch(retry - 1);
-            }
-          }
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext("2d");
 
-          const data = await fetchFedWatch();
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, width, height);
 
-          const meetingDate = data.meetingDate || "FOMC";
-          const rows = data.probabilities || [];
+    ctx.fillStyle = mode === "post" ? "#065f46" : "#1e3a8a";
+    ctx.font = "bold 30px Sans";
+    ctx.fillText(
+      mode === "post" ? "FedWatch (After FOMC)" : "FedWatch (Before FOMC)",
+      30,
+      42
+    );
 
-          if (rows.length === 0) {
-            throw new Error("No probabilities in FedWatch JSON");
-          }
+    ctx.fillStyle = "#111";
+    ctx.font = "20px Sans";
+    ctx.fillText(`Meeting: ${meetingDate}`, 30, 72);
 
-          // =====================================================
-          // ② Canvas で画像生成
-          // =====================================================
-          const mode = process.env.MODE || "pre";
+    let y = 110;
+    ctx.font = "bold 20px Sans";
+    ctx.fillText("Target Rate", 40, y);
+    ctx.fillText("Probability", 360, y);
 
-          const width = 900;
-          const rowH = 48;
-          const height = 140 + rows.length * rowH;
+    y += 16;
+    ctx.font = "20px Sans";
 
-          const canvas = createCanvas(width, height);
-          const ctx = canvas.getContext("2d");
+    const maxP = Math.max(...rows.map(r => Number(r.probability)));
 
-          // 背景
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, width, height);
+    rows.forEach(r => {
+      y += rowH;
+      const p = Number(r.probability);
 
-          // タイトル（modeで色・文言変更）
-          ctx.fillStyle = mode === "post" ? "#065f46" : "#1e3a8a";
-          ctx.font = "bold 30px Sans";
-          ctx.fillText(
-            mode === "post"
-              ? "FedWatch (After FOMC)"
-              : "FedWatch (Before FOMC)",
-            30,
-            42
-          );
+      ctx.fillStyle = p === maxP ? "#dc2626" : "#000";
+      ctx.fillText(r.targetRate, 40, y);
+      ctx.fillText(`${p.toFixed(1)}%`, 360, y);
 
-          ctx.fillStyle = "#111";
-          ctx.font = "20px Sans";
-          ctx.fillText(`Meeting: ${meetingDate}`, 30, 72);
+      ctx.fillStyle = p === maxP ? "#dc2626" : "#2563eb";
+      ctx.fillRect(480, y - 18, p * 3, 18);
+    });
 
-          // ヘッダ
-          let y = 110;
-          ctx.font = "bold 20px Sans";
-          ctx.fillText("Target Rate", 40, y);
-          ctx.fillText("Probability", 360, y);
-
-          y += 16;
-          ctx.font = "20px Sans";
-
-          // 最大確率を取得（ハイライト用）
-          const maxP = Math.max(...rows.map(r => Number(r.probability)));
-
-          rows.forEach(r => {
-            y += rowH;
-            const p = Number(r.probability);
-
-            // 最大確率行を強調
-            ctx.fillStyle = p === maxP ? "#dc2626" : "#000";
-            ctx.fillText(r.targetRate, 40, y);
-            ctx.fillText(`${p.toFixed(1)}%`, 360, y);
-
-            // バー
-            ctx.fillStyle = p === maxP ? "#dc2626" : "#2563eb";
-            ctx.fillRect(480, y - 18, p * 3, 18);
-          });
-
-          fs.writeFileSync("fedwatch.png", canvas.toBuffer("image/png"));
-          console.log("fedwatch.png generated");
-          EOF
-
-      - name: Check image
-        run: ls -lh fedwatch.png
-
-      # -------------------------
-      # X 投稿（OAuth1）
-      # -------------------------
-      - name: Post to X
-        env:
-          X_API_KEY: ${{ secrets.X_API_KEY }}
-          X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
-          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          TWEET_TEXT: ${{ inputs.text }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "DRY RUN"
-            exit 0
-          fi
-
-          node << 'EOF'
-          const fs = require("fs");
-          const crypto = require("crypto");
-          const https = require("https");
-
-          const imagePath = "fedwatch.png";
-          const text = process.env.TWEET_TEXT;
-
-          const apiKey = process.env.X_API_KEY;
-          const apiKeySecret = process.env.X_API_KEY_SECRET;
-          const accessToken = process.env.X_ACCESS_TOKEN;
-          const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET;
-
-          function pct(s){return encodeURIComponent(s).replace(/[!*()']/g,c=>"%" + c.charCodeAt(0).toString(16));}
-          function nonce(){return crypto.randomBytes(16).toString("hex");}
-          function ts(){return Math.floor(Date.now()/1000).toString();}
-
-          function oauthHeader(method, url) {
-            const u = new URL(url);
-            const baseUrl = u.origin + u.pathname;
-            const params = {
-              oauth_consumer_key: apiKey,
-              oauth_nonce: nonce(),
-              oauth_signature_method: "HMAC-SHA1",
-              oauth_timestamp: ts(),
-              oauth_token: accessToken,
-              oauth_version: "1.0",
-            };
-            const sorted = Object.keys(params).sort().map(k => `${pct(k)}=${pct(params[k])}`).join("&");
-            const base = [method, pct(baseUrl), pct(sorted)].join("&");
-            const key = `${pct(apiKeySecret)}&${pct(accessTokenSecret)}`;
-            params.oauth_signature = crypto.createHmac("sha1", key).update(base).digest("base64");
-
-            return "OAuth " + Object.keys(params)
-              .map(k => `${pct(k)}="${pct(params[k])}"`).join(", ");
-          }
-
-          function uploadMedia() {
-            return new Promise((resolve, reject) => {
-              const boundary = "----fw" + crypto.randomBytes(6).toString("hex");
-              const file = fs.readFileSync(imagePath);
-              const body = Buffer.concat([
-                Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="fedwatch.png"\r\nContent-Type: image/png\r\n\r\n`),
-                file,
-                Buffer.from(`\r\n--${boundary}--`)
-              ]);
-
-              const req = https.request(
-                "https://upload.twitter.com/1.1/media/upload.json",
-                {
-                  method: "POST",
-                  headers: {
-                    Authorization: oauthHeader("POST", "https://upload.twitter.com/1.1/media/upload.json"),
-                    "Content-Type": `multipart/form-data; boundary=${boundary}`,
-                    "Content-Length": body.length
-                  }
-                },
-                res => {
-                  let data = "";
-                  res.on("data", c => data += c);
-                  res.on("end", () => resolve(JSON.parse(data)));
-                }
-              );
-              req.on("error", reject);
-              req.write(body);
-              req.end();
-            });
-          }
-
-          function postTweet(mediaId) {
-            return new Promise((resolve, reject) => {
-              const body = JSON.stringify({
-                text,
-                media: { media_ids: [mediaId] }
-              });
-
-              const req = https.request(
-                "https://api.twitter.com/2/tweets",
-                {
-                  method: "POST",
-                  headers: {
-                    Authorization: oauthHeader("POST", "https://api.twitter.com/2/tweets"),
-                    "Content-Type": "application/json",
-                    "Content-Length": Buffer.byteLength(body)
-                  }
-                },
-                res => {
-                  let data = "";
-                  res.on("data", c => data += c);
-                  res.on("end", () => resolve(data));
-                }
-              );
-              req.on("error", reject);
-              req.write(body);
-              req.end();
-            });
-          }
-
-          (async () => {
-            const media = await uploadMedia();
-            await postTweet(media.media_id_string);
-            console.log("Posted with image");
-          })();
-          EOF
+    fs.writeFileSync("fedwatch.png", canvas.toBuffer("image/png"));
+    EOF
