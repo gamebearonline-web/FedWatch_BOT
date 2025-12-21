@@ -102,21 +102,20 @@ jobs:
           print(text)
           PY
           
-           {
-            echo "text<<__EOF__"
-            cat tweet.txt
-            echo "__EOF__"
-           } >> "$GITHUB_OUTPUT"
+          ENCODED=$(base64 -w 0 tweet.txt)
+          echo "text_b64=$ENCODED" >> "$GITHUB_OUTPUT"
+
 
 
       - name: Post to X (OAuth1) - text only
         env:
-          DRY_RUN: ${{ inputs.dry_run }}
-          X_API_KEY: ${{ secrets.X_API_KEY }}
-          X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
-          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          TWEET_TEXT: ${{ steps.tw.outputs.text }}
+         DRY_RUN: ${{ inputs.dry_run }}
+         X_API_KEY: ${{ secrets.X_API_KEY }}
+         X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
+         X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+         X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+         TWEET_TEXT_B64: ${{ steps.tw.outputs.text_b64 }}
+
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY RUN:"
@@ -128,7 +127,7 @@ jobs:
           const crypto = require("crypto");
           const https = require("https");
 
-          const text = process.env.TWEET_TEXT;
+          const text = Buffer.from(process.env.TWEET_TEXT_B64, "base64").toString("utf8");
           const apiKey = process.env.X_API_KEY;
           const apiKeySecret = process.env.X_API_KEY_SECRET;
           const accessToken = process.env.X_ACCESS_TOKEN;
