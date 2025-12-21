@@ -1,19 +1,47 @@
-name: Post to X
+name: Post to X (text only)
 
 on:
   workflow_dispatch:
     inputs:
       post_text:
-        description: "Text to post"
+        description: "Text to post on X"
         required: true
+        type: string
+      dry_run:
+        description: "If true, do not post (just print payload)"
+        required: false
+        default: "false"
+        type: string
+
+concurrency:
+  group: post-x-text
+  cancel-in-progress: false
 
 jobs:
   post:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Post to X
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
-          echo "${{ inputs.post_text }}"
-          # ここで X API 投稿処理
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Post to X (v2)
+        env:
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          POST_TEXT: ${{ inputs.post_text }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          python scripts/post_x_text.py
