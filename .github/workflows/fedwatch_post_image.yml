@@ -22,43 +22,63 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- Node 環境 ---
+      # -------------------------
+      # Node 環境
+      # -------------------------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # --- 依存関係 ---
+      # -------------------------
+      # 依存関係
+      # -------------------------
       - name: Install deps
         run: |
           npm init -y
           npm install canvas node-fetch@3
 
-      # --- CME FedWatch JSON → 画像生成 ---
+      # -------------------------
+      # CME FedWatch JSON → 画像生成
+      # -------------------------
       - name: Generate FedWatch Image
+        env:
+          MODE: ${{ inputs.mode }}
         run: |
           node << 'EOF'
           import fetch from "node-fetch";
           import { createCanvas } from "canvas";
           import fs from "fs";
 
-          // --- ① FedWatch JSON ---
-           const res = await fetch(
-             "https://www.cmegroup.com/CmeWS/mvc/FedWatch/GetFedWatchData",
-             {
-               headers: {
-                 "User-Agent":
-                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                   "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                 "Accept": "application/json, text/plain, */*",
-                 "Referer":
-                   "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html",
-               },
-               redirect: "follow",
-             }
-           );
-          if (!res.ok) throw new Error("Failed to fetch FedWatch JSON");
-          const data = await res.json();
+          // =====================================================
+          // ① FedWatch JSON（UA付き + リトライ付き）
+          // =====================================================
+          async function fetchFedWatch(retry = 3) {
+            try {
+              const res = await fetch(
+                "https://www.cmegroup.com/CmeWS/mvc/FedWatch/GetFedWatchData",
+                {
+                  headers: {
+                    "User-Agent":
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                      "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer":
+                      "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html",
+                  },
+                  redirect: "follow",
+                }
+              );
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              return await res.json();
+            } catch (e) {
+              if (retry <= 0) throw e;
+              await new Promise(r => setTimeout(r, 1500));
+              return fetchFedWatch(retry - 1);
+            }
+          }
+
+          const data = await fetchFedWatch();
 
           const meetingDate = data.meetingDate || "FOMC";
           const rows = data.probabilities || [];
@@ -67,7 +87,11 @@ jobs:
             throw new Error("No probabilities in FedWatch JSON");
           }
 
-          // --- ② Canvas で画像生成 ---
+          // =====================================================
+          // ② Canvas で画像生成
+          // =====================================================
+          const mode = process.env.MODE || "pre";
+
           const width = 900;
           const rowH = 48;
           const height = 140 + rows.length * rowH;
@@ -79,11 +103,18 @@ jobs:
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(0, 0, width, height);
 
-          // タイトル
-          ctx.fillStyle = "#111";
+          // タイトル（modeで色・文言変更）
+          ctx.fillStyle = mode === "post" ? "#065f46" : "#1e3a8a";
           ctx.font = "bold 30px Sans";
-          ctx.fillText("FedWatch Probabilities", 30, 42);
+          ctx.fillText(
+            mode === "post"
+              ? "FedWatch (After FOMC)"
+              : "FedWatch (Before FOMC)",
+            30,
+            42
+          );
 
+          ctx.fillStyle = "#111";
           ctx.font = "20px Sans";
           ctx.fillText(`Meeting: ${meetingDate}`, 30, 72);
 
@@ -94,19 +125,22 @@ jobs:
           ctx.fillText("Probability", 360, y);
 
           y += 16;
-
           ctx.font = "20px Sans";
+
+          // 最大確率を取得（ハイライト用）
+          const maxP = Math.max(...rows.map(r => Number(r.probability)));
 
           rows.forEach(r => {
             y += rowH;
             const p = Number(r.probability);
 
-            ctx.fillStyle = "#000";
+            // 最大確率行を強調
+            ctx.fillStyle = p === maxP ? "#dc2626" : "#000";
             ctx.fillText(r.targetRate, 40, y);
             ctx.fillText(`${p.toFixed(1)}%`, 360, y);
 
             // バー
-            ctx.fillStyle = "#2563eb";
+            ctx.fillStyle = p === maxP ? "#dc2626" : "#2563eb";
             ctx.fillRect(480, y - 18, p * 3, 18);
           });
 
@@ -117,7 +151,9 @@ jobs:
       - name: Check image
         run: ls -lh fedwatch.png
 
-      # --- 投稿（OAuth1 / 既存ロジック） ---
+      # -------------------------
+      # X 投稿（OAuth1）
+      # -------------------------
       - name: Post to X
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
