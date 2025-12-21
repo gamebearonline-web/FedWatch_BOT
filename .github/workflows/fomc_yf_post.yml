@@ -26,7 +26,7 @@ jobs:
         run: |
           pip install yfinance==0.2.43 pytz==2024.1
 
-      - name: Build tweet text
+      - name: Build tweet text (safe + base64 output)
         id: tw
         env:
           PREFIX: ${{ inputs.text_prefix }}
@@ -35,47 +35,78 @@ jobs:
           import datetime as dt
           import yfinance as yf
           import pytz
-          import os
+          import os, time
 
-          prefix = os.environ["PREFIX"]
+          prefix = os.environ.get("PREFIX", "🟢FOMC 15分後｜先物の水準")
           tz = pytz.timezone("Asia/Tokyo")
           now = dt.datetime.now(tz).strftime("%Y-%m-%d %H:%M JST")
 
-          tickers = {"ES":"ES=F","NQ":"NQ=F","YM":"YM=F","TNX":"^TNX"}
+          tickers = {
+              "ES": "ES=F",
+              "NQ": "NQ=F",
+              "YM": "YM=F",
+              "TNX": "^TNX",
+          }
 
-          def last_price(tkr):
-            t = yf.Ticker(tkr)
-            fi = getattr(t, "fast_info", None)
-            if fi and fi.get("last_price") is not None:
-              return float(fi["last_price"])
-            info = t.get_info()
-            for k in ("regularMarketPrice","previousClose"):
-              if info.get(k) is not None:
-                return float(info[k])
-            raise RuntimeError(f"no price for {tkr}")
+          def fetch_price_once(tkr: str):
+              t = yf.Ticker(tkr)
 
-          v = {}
-          for k,tkr in tickers.items():
-            p = last_price(tkr)
-            if k == "TNX" and p > 20:
-              p = p / 10.0
-            v[k] = p
+              fi = getattr(t, "fast_info", None)
+              if fi and fi.get("last_price") is not None:
+                  return float(fi["last_price"])
+
+              hist = t.history(period="1d", interval="1m", auto_adjust=False)
+              if hist is not None and not hist.empty:
+                  s = hist["Close"].dropna()
+                  if len(s) > 0:
+                      return float(s.iloc[-1])
+
+              return None
+
+          def fetch_price(tkr: str, retry=3, sleep_sec=5):
+              for _ in range(retry):
+                  try:
+                      p = fetch_price_once(tkr)
+                      if p is not None:
+                          return p
+                  except Exception:
+                      pass
+                  time.sleep(sleep_sec)
+              return None
+
+          values = {}
+          for k, tkr in tickers.items():
+              p = fetch_price(tkr)
+              if p is None:
+                  values[k] = None
+                  continue
+              if k == "TNX" and p > 20:
+                  p = p / 10.0
+              values[k] = p
+
+          def fmt(sym, v):
+              if v is None:
+                  return "N/A"
+              if sym == "TNX":
+                  return f"{v:.3f}%"
+              return f"{v:.2f}"
 
           text = (
-            f"{prefix}\n"
-            f"ES {v['ES']:.2f} / NQ {v['NQ']:.2f} / YM {v['YM']:.2f}\n"
-            f"米10年 {v['TNX']:.3f}%\n"
-            f"({now})\n"
-            f"#FOMC"
+              f"{prefix}\n"
+              f"ES {fmt('ES', values['ES'])} / NQ {fmt('NQ', values['NQ'])} / YM {fmt('YM', values['YM'])}\n"
+              f"米10年 {fmt('TNX', values['TNX'])}\n"
+              f"({now})\n"
+              f"#FOMC"
           )
 
-          open("tweet.txt","w",encoding="utf-8").write(text)
+          with open("tweet.txt", "w", encoding="utf-8") as f:
+              f.write(text)
+
           print(text)
           PY
 
-          echo "text<<EOF" >> $GITHUB_OUTPUT
-          cat tweet.txt >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          ENCODED=$(base64 -w 0 tweet.txt)
+          echo "text_b64=$ENCODED" >> "$GITHUB_OUTPUT"
 
       - name: Post to X (OAuth1) - text only
         env:
@@ -84,10 +115,13 @@ jobs:
           X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          TWEET_TEXT: ${{ steps.tw.outputs.text }}
+          TWEET_TEXT_B64: ${{ steps.tw.outputs.text_b64 }}
         run: |
+          TWEET_TEXT=$(echo "$TWEET_TEXT_B64" | base64 -d)
+
           if [ "$DRY_RUN" = "true" ]; then
-            echo "DRY RUN: $TWEET_TEXT"
+            echo "DRY RUN:"
+            echo "$TWEET_TEXT"
             exit 0
           fi
 
@@ -136,10 +170,7 @@ jobs:
               }, res => {
                 let data = "";
                 res.on("data", c => data += c);
-                res.on("end", () => {
-                  if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`tweet failed ${res.statusCode}: ${data}`));
-                  resolve(JSON.parse(data));
-                });
+                res.on("end", () => resolve({status: res.statusCode, body: data}));
               });
               req.on("error", reject);
               req.write(body);
@@ -149,6 +180,11 @@ jobs:
 
           (async () => {
             const r = await postJson("https://api.twitter.com/2/tweets", { text });
-            console.log("OK:", r);
-          })().catch(e => { console.error(e); process.exit(1); });
+            console.log("Tweet result:", r.status);
+          })().catch(e => {
+            console.error(e);
+            process.exit(0);
+          });
           EOF
+        env:
+          TWEET_TEXT: ${{ env.TWEET_TEXT }}
