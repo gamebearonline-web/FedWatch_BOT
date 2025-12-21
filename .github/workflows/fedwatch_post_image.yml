@@ -1,4 +1,4 @@
-name: FedWatch Image Post (GAS Trigger)
+name: FedWatch Image Post (Auto Capture)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,6 @@ on:
       text:
         description: "post text"
         required: true
-        default: "🟡FOMC前日｜FedWatch"
       dry_run:
         description: "true/false"
         required: false
@@ -19,154 +18,170 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select image
-        id: img
-        run: |
-          if [ "${{ inputs.mode }}" = "post" ]; then
-            echo "path=assets/fedwatch_post.png" >> $GITHUB_OUTPUT
-          else
-            echo "path=assets/fedwatch_pre.png" >> $GITHUB_OUTPUT
-          fi
+      # --- Playwright環境 ---
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Check image exists
+      - name: Install Playwright
         run: |
-          ls -la "${{ steps.img.outputs.path }}"
+          npm init -y
+          npm install playwright
+          npx playwright install chromium
 
-      # ここはあなたの既存の「X API v2対応・画像なし投稿」実装に合わせて差し替えてOK
-      # 画像付きにするので、(1) media upload(v1.1) → (2) tweet create(v2) が必要です。
-      - name: Post to X with image
+      # --- CME FedWatch をキャプチャ ---
+      - name: Capture FedWatch Image
+        run: |
+          node << 'EOF'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch();
+            const page = await browser.newPage({
+              viewport: { width: 1280, height: 900 }
+            });
+
+            await page.goto(
+              'https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html',
+              { waitUntil: 'networkidle' }
+            );
+
+            // Cookie / banner 対策（あれば）
+            await page.waitForTimeout(5000);
+
+            // FedWatch の確率テーブル（DOM変更に強め）
+            const target = await page.$('div.cmeFedWatchTool, table');
+            if (!target) throw new Error('FedWatch table not found');
+
+            await target.screenshot({ path: 'fedwatch.png' });
+
+            await browser.close();
+          })();
+          EOF
+
+      - name: Check image
+        run: ls -lh fedwatch.png
+
+      # --- 投稿（OAuth1） ---
+      - name: Post to X
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_KEY_SECRET: ${{ secrets.X_API_KEY_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          TWEET_TEXT: ${{ inputs.text }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "DRY RUN: mode=${{ inputs.mode }}"
-            echo "DRY RUN: text=${{ inputs.text }}"
-            echo "DRY RUN: image=${{ steps.img.outputs.path }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN"
             exit 0
           fi
 
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+          node << 'EOF'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const https = require("https");
 
-          # --- media upload (X API v1.1) ---
-          # oauth1署名が必要なので nodeで処理（簡単で安定）
-          node -e '
-            const fs = require("fs");
-            const crypto = require("crypto");
-            const https = require("https");
-            const path = process.env.IMG_PATH;
-            const text = process.env.TWEET_TEXT;
+          const imagePath = "fedwatch.png";
+          const text = process.env.TWEET_TEXT;
 
-            const apiKey = process.env.X_API_KEY;
-            const apiKeySecret = process.env.X_API_KEY_SECRET;
-            const accessToken = process.env.X_ACCESS_TOKEN;
-            const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET;
+          const apiKey = process.env.X_API_KEY;
+          const apiKeySecret = process.env.X_API_KEY_SECRET;
+          const accessToken = process.env.X_ACCESS_TOKEN;
+          const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET;
 
-            function pct(s){return encodeURIComponent(s).replace(/[!*()']/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());}
-            function nonce(){return crypto.randomBytes(16).toString("hex");}
-            function ts(){return Math.floor(Date.now()/1000).toString();}
+          function pct(s){return encodeURIComponent(s).replace(/[!*()']/g,c=>"%" + c.charCodeAt(0).toString(16));}
+          function nonce(){return crypto.randomBytes(16).toString("hex");}
+          function ts(){return Math.floor(Date.now()/1000).toString();}
 
-            function oauthHeader(method, url, extraParams){
-              const u = new URL(url);
-              const baseUrl = u.origin + u.pathname;
+          function oauthHeader(method, url) {
+            const u = new URL(url);
+            const baseUrl = u.origin + u.pathname;
+            const params = {
+              oauth_consumer_key: apiKey,
+              oauth_nonce: nonce(),
+              oauth_signature_method: "HMAC-SHA1",
+              oauth_timestamp: ts(),
+              oauth_token: accessToken,
+              oauth_version: "1.0",
+            };
+            const sorted = Object.keys(params).sort().map(k => `${pct(k)}=${pct(params[k])}`).join("&");
+            const base = [method, pct(baseUrl), pct(sorted)].join("&");
+            const key = `${pct(apiKeySecret)}&${pct(accessTokenSecret)}`;
+            params.oauth_signature = crypto.createHmac("sha1", key).update(base).digest("base64");
 
-              const params = {
-                oauth_consumer_key: apiKey,
-                oauth_nonce: nonce(),
-                oauth_signature_method: "HMAC-SHA1",
-                oauth_timestamp: ts(),
-                oauth_token: accessToken,
-                oauth_version: "1.0",
-                ...(extraParams || {})
-              };
+            return "OAuth " + Object.keys(params)
+              .map(k => `${pct(k)}="${pct(params[k])}"`).join(", ");
+          }
 
-              const sorted = Object.keys(params).sort().map(k => `${pct(k)}=${pct(params[k])}`).join("&");
-              const base = [method.toUpperCase(), pct(baseUrl), pct(sorted)].join("&");
-              const key = `${pct(apiKeySecret)}&${pct(accessTokenSecret)}`;
-              const sig = crypto.createHmac("sha1", key).update(base).digest("base64");
-              params.oauth_signature = sig;
+          function uploadMedia() {
+            return new Promise((resolve, reject) => {
+              const boundary = "----fw" + crypto.randomBytes(6).toString("hex");
+              const file = fs.readFileSync(imagePath);
+              const body = Buffer.concat([
+                Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="fedwatch.png"\r\nContent-Type: image/png\r\n\r\n`),
+                file,
+                Buffer.from(`\r\n--${boundary}--`)
+              ]);
 
-              const header = "OAuth " + Object.keys(params)
-                .filter(k => k.startsWith("oauth_"))
-                .sort()
-                .map(k => `${pct(k)}="${pct(params[k])}"`).join(", ");
-              return header;
-            }
-
-            function postMultipart(url, filePath){
-              return new Promise((resolve, reject) => {
-                const boundary = "----fedwatch" + crypto.randomBytes(8).toString("hex");
-                const file = fs.readFileSync(filePath);
-                const head = Buffer.from(
-                  `--${boundary}\r\n` +
-                  `Content-Disposition: form-data; name="media"; filename="image.png"\r\n` +
-                  `Content-Type: image/png\r\n\r\n`
-                );
-                const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
-                const body = Buffer.concat([head, file, tail]);
-
-                const auth = oauthHeader("POST", url);
-                const req = https.request(url, {
+              const req = https.request(
+                "https://upload.twitter.com/1.1/media/upload.json",
+                {
                   method: "POST",
                   headers: {
-                    "Authorization": auth,
+                    Authorization: oauthHeader("POST", "https://upload.twitter.com/1.1/media/upload.json"),
                     "Content-Type": `multipart/form-data; boundary=${boundary}`,
                     "Content-Length": body.length
                   }
-                }, res => {
+                },
+                res => {
                   let data = "";
                   res.on("data", c => data += c);
-                  res.on("end", () => {
-                    if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`media upload failed ${res.statusCode}: ${data}`));
-                    resolve(JSON.parse(data));
-                  });
-                });
-                req.on("error", reject);
-                req.write(body);
-                req.end();
-              });
-            }
+                  res.on("end", () => resolve(JSON.parse(data)));
+                }
+              );
+              req.on("error", reject);
+              req.write(body);
+              req.end();
+            });
+          }
 
-            function postJson(url, payload){
-              return new Promise((resolve, reject) => {
-                const body = Buffer.from(JSON.stringify(payload));
-                const auth = oauthHeader("POST", url);
-                const req = https.request(url, {
-                  method: "POST",
-                  headers: {
-                    "Authorization": auth,
-                    "Content-Type": "application/json",
-                    "Content-Length": body.length
-                  }
-                }, res => {
-                  let data = "";
-                  res.on("data", c => data += c);
-                  res.on("end", () => {
-                    if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`tweet failed ${res.statusCode}: ${data}`));
-                    resolve(JSON.parse(data));
-                  });
-                });
-                req.on("error", reject);
-                req.write(body);
-                req.end();
-              });
-            }
-
-            (async () => {
-              const mediaRes = await postMultipart("https://upload.twitter.com/1.1/media/upload.json", path);
-              const mediaId = mediaRes.media_id_string;
-              const tweetRes = await postJson("https://api.twitter.com/2/tweets", {
+          function postTweet(mediaId) {
+            return new Promise((resolve, reject) => {
+              const body = JSON.stringify({
                 text,
                 media: { media_ids: [mediaId] }
               });
-              console.log("OK:", tweetRes);
-            })().catch(e => { console.error(e); process.exit(1); });
-          ' \
-          IMG_PATH="${{ steps.img.outputs.path }}" \
-          TWEET_TEXT="${{ inputs.text }}"
+
+              const req = https.request(
+                "https://api.twitter.com/2/tweets",
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: oauthHeader("POST", "https://api.twitter.com/2/tweets"),
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(body)
+                  }
+                },
+                res => {
+                  let data = "";
+                  res.on("data", c => data += c);
+                  res.on("end", () => resolve(data));
+                }
+              );
+              req.on("error", reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          (async () => {
+            const media = await uploadMedia();
+            await postTweet(media.media_id_string);
+            console.log("Posted with image");
+          })();
+          EOF
