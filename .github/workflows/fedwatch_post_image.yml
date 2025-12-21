@@ -43,9 +43,20 @@ jobs:
           import fs from "fs";
 
           // --- ① FedWatch JSON ---
-          const res = await fetch(
-            "https://www.cmegroup.com/CmeWS/mvc/FedWatch/GetFedWatchData"
-          );
+           const res = await fetch(
+             "https://www.cmegroup.com/CmeWS/mvc/FedWatch/GetFedWatchData",
+             {
+               headers: {
+                 "User-Agent":
+                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                   "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                 "Accept": "application/json, text/plain, */*",
+                 "Referer":
+                   "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html",
+               },
+               redirect: "follow",
+             }
+           );
           if (!res.ok) throw new Error("Failed to fetch FedWatch JSON");
           const data = await res.json();
 
