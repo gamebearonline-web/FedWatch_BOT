@@ -101,10 +101,13 @@ jobs:
           open("tweet.txt", "w", encoding="utf-8").write(text)
           print(text)
           PY
+          
+           {
+            echo "text<<__EOF__"
+            cat tweet.txt
+            echo "__EOF__"
+           } >> "$GITHUB_OUTPUT"
 
-          echo "text<<EOF" >> $GITHUB_OUTPUT
-          cat tweet.txt >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Post to X (OAuth1) - text only
         env:
