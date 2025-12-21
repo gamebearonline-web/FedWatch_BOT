@@ -44,15 +44,20 @@ jobs:
           tickers = {"ES":"ES=F","NQ":"NQ=F","YM":"YM=F","TNX":"^TNX"}
 
           def last_price(tkr):
-            t = yf.Ticker(tkr)
-            fi = getattr(t, "fast_info", None)
-            if fi and fi.get("last_price") is not None:
-              return float(fi["last_price"])
-            info = t.get_info()
-            for k in ("regularMarketPrice","previousClose"):
-              if info.get(k) is not None:
-                return float(info[k])
-            raise RuntimeError(f"no price for {tkr}")
+              t = yf.Ticker(tkr)
+
+              # ① fast_info が取れれば最優先
+              fi = getattr(t, "fast_info", None)
+              if fi and fi.get("last_price") is not None:
+                  return float(fi["last_price"])
+
+              # ② 直近1分足の終値（最も安定）
+              hist = t.history(period="1d", interval="1m", auto_adjust=False)
+              if not hist.empty:
+                  return float(hist["Close"].dropna().iloc[-1])
+
+              # ③ どうしてもダメなら例外（投稿スキップ）
+              raise RuntimeError(f"price unavailable for {tkr}")
 
           v = {}
           for k,tkr in tickers.items():
